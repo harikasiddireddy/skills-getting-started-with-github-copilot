@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 import os
 from pathlib import Path
+import threading
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
@@ -83,6 +84,8 @@ activities = {
     }
 }
 
+# Global lock to make signups/removals thread-safe
+_activities_lock = threading.Lock()
 
 
 @app.get("/")
@@ -97,7 +100,12 @@ def get_activities():
 
 @app.post("/activities/{activity_name}/signup")
 def signup_for_activity(activity_name: str, email: str):
-    """Sign up a student for an activity"""
+    """Sign up a student for an activity
+
+    This function enforces the activity's max_participants and uses a global
+    lock to prevent race conditions when checking and modifying the
+    participants list.
+    """
     # Validate activity exists
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
@@ -105,23 +113,36 @@ def signup_for_activity(activity_name: str, email: str):
     # Get the specific activity
     activity = activities[activity_name]
 
-    # Add student
-    # Validate student is not already signed up
-    if email in activity["participants"]:
-        raise HTTPException(status_code=400, detail="Student already signed up for this activity")
-    activity["participants"].append(email)
+    # Use lock to ensure atomic check-and-add
+    with _activities_lock:
+        # Validate student is not already signed up
+        if email in activity["participants"]:
+            raise HTTPException(status_code=400, detail="Student already signed up for this activity")
+
+        # Enforce max participants
+        if len(activity["participants"]) >= activity.get("max_participants", float("inf")):
+            raise HTTPException(status_code=400, detail="Activity is full")
+
+        activity["participants"].append(email)
+
     return {"message": f"Signed up {email} for {activity_name}"}
 
 
 @app.delete("/activities/{activity_name}/participants")
 def remove_participant(activity_name: str, email: str):
-    """Remove a student from an activity."""
+    """Remove a student from an activity.
+
+    Uses a global lock to make removal thread-safe.
+    """
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
 
     activity = activities[activity_name]
-    if email not in activity["participants"]:
-        raise HTTPException(status_code=404, detail="Participant not found for this activity")
 
-    activity["participants"].remove(email)
+    with _activities_lock:
+        if email not in activity["participants"]:
+            raise HTTPException(status_code=404, detail="Participant not found for this activity")
+
+        activity["participants"].remove(email)
+
     return {"message": f"Unregistered {email} from {activity_name}"}
